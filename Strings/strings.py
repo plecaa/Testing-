@@ -116,7 +116,7 @@ challenge = 'thirty days of python'
 print(challenge.find('y'))  # 5
 print(challenge.find('th')) # 0
 
-# format()	formats string into nicer output    
+# format()	formats string into nicer output   
 first_name = 'Arnold'
 last_name = 'muleya'
 job = 'teacher'
