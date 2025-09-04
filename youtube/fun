@@ -1,4 +1,4 @@
 def cal_area(length, width):
     area = length * width
-    return area
+    print(area)
 cal_area(10, 12)

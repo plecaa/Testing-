@@ -1,0 +1,4 @@
+language = 'python'
+lst = list(language)
+print(type(lst))
+print(lst) 
