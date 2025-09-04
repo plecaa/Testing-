@@ -2,3 +2,8 @@ language = 'python'
 lst = list(language)
 print(type(lst))
 print(lst) 
+
+
+lst = [i for i in language]
+print(type(lst))
+print(lst)
