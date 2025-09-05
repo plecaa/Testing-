@@ -1,0 +1,193 @@
+import sys
+import math
+from pathlib import Path
+
+import cv2
+import numpy as np
+import pygame
+from PIL import Image
+
+# ---------- CONFIG ----------
+WINDOW_W, WINDOW_H = 960, 540
+TILE = 18                    # tile size in pixels
+EDGE_TH1, EDGE_TH2 = 80, 160 # Canny thresholds
+DILATE_ITERS = 2             # thicken edges to make solid tiles
+GRAVITY = 0.8
+JUMP_VEL = -12
+MOVE_SPEED = 4.0
+MAX_FALL_SPEED = 16
+BG_COLOR = (18, 18, 22)
+PLAYER_COLOR = (255, 230, 90)
+WALL_COLOR = (120, 200, 255)
+
+# ---------- IMAGE → TILEMAP ----------
+def image_to_tilemap(img_path: Path, target_tiles_w=WINDOW_W // TILE, target_tiles_h=WINDOW_H // TILE):
+    # Load with Pillow to handle many formats, then to NumPy for OpenCV
+    im = Image.open(img_path).convert("RGB")
+    # Keep aspect ratio while fitting into target grid (Pillow docs show resize/thumbnail usage)
+    # https://pillow.readthedocs.io/en/stable/handbook/tutorial.html
+    im.thumbnail((target_tiles_w, target_tiles_h), Image.LANCZOS)
+
+    # Center the thumbnail onto a black canvas of target grid size
+    canvas = Image.new("RGB", (target_tiles_w, target_tiles_h), (0, 0, 0))
+    x = (target_tiles_w - im.width) // 2
+    y = (target_tiles_h - im.height) // 2
+    canvas.paste(im, (x, y))
+
+    # To OpenCV
+    small = np.array(canvas)[:, :, ::-1]  # RGB->BGR
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+    # Edge detection (Canny) per OpenCV guide
+    # https://docs.opencv.org/4.x/da/d22/tutorial_py_canny.html
+    edges = cv2.Canny(gray, EDGE_TH1, EDGE_TH2)
+
+    # Thicken edges → solid walls
+    kernel = np.ones((3, 3), np.uint8)
+    edges = cv2.dilate(edges, kernel, iterations=DILATE_ITERS)
+
+    # Optional: remove tiny specks by closing & opening
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=1)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    # Binary grid of tiles (1 = wall, 0 = empty)
+    tilemap = (edges > 0).astype(np.uint8)
+    return tilemap
+
+# ---------- WORLD / COLLISIONS ----------
+def build_walls_from_tilemap(tilemap):
+    h, w = tilemap.shape
+    walls = []
+    for ty in range(h):
+        for tx in range(w):
+            if tilemap[ty, tx]:
+                walls.append(pygame.Rect(tx * TILE, ty * TILE, TILE, TILE))
+    return walls
+
+def rect_collide_list(rect, rects):
+    return [r for r in rects if rect.colliderect(r)]
+
+# ---------- PLAYER ----------
+class Player:
+    def __init__(self, x, y, w=14, h=20):
+        self.rect = pygame.Rect(x, y, w, h)
+        self.vel_x = 0.0
+        self.vel_y = 0.0
+        self.on_ground = False
+
+    def update(self, keys, walls):
+        # Horizontal input
+        self.vel_x = 0
+        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+            self.vel_x -= MOVE_SPEED
+        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+            self.vel_x += MOVE_SPEED
+
+        # Apply gravity
+        self.vel_y = min(self.vel_y + GRAVITY, MAX_FALL_SPEED)
+
+        # Jump
+        if (keys[pygame.K_SPACE] or keys[pygame.K_w] or keys[pygame.K_UP]) and self.on_ground:
+            self.vel_y = JUMP_VEL
+            self.on_ground = False
+
+        # --- Move X
+        self.rect.x += int(self.vel_x)
+        for hit in rect_collide_list(self.rect, walls):
+            if self.vel_x > 0:
+                self.rect.right = hit.left
+            elif self.vel_x < 0:
+                self.rect.left = hit.right
+
+        # --- Move Y
+        self.rect.y += int(self.vel_y)
+        self.on_ground = False
+        for hit in rect_collide_list(self.rect, walls):
+            if self.vel_y > 0:
+                self.rect.bottom = hit.top
+                self.vel_y = 0
+                self.on_ground = True
+            elif self.vel_y < 0:
+                self.rect.top = hit.bottom
+                self.vel_y = 0
+
+# ---------- MAIN ----------
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python image_to_platformer.py <image_path>")
+        sys.exit(1)
+
+    img_path = Path(sys.argv[1])
+    if not img_path.exists():
+        print(f"Image not found: {img_path}")
+        sys.exit(1)
+
+    pygame.init()
+    screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+    pygame.display.set_caption("Image → Platformer (edges become walls)")
+    clock = pygame.time.Clock()
+
+    tilemap = image_to_tilemap(img_path)
+    walls = build_walls_from_tilemap(tilemap)
+
+    # Build a simple background from the original image scaled to window
+    bg_img = pygame.transform.smoothscale(
+        pygame.image.load(str(img_path)).convert(),
+        (WINDOW_W, WINDOW_H)
+    )
+
+    # Spawn player at first empty tile near bottom
+    spawn_x, spawn_y = 50, 50
+    h, w = tilemap.shape
+    for ty in range(h - 1, -1, -1):
+        for tx in range(w):
+            if tilemap[ty, tx] == 0:
+                spawn_x = tx * TILE + TILE // 2
+                spawn_y = ty * TILE - 10
+                break
+        else:
+            continue
+        break
+
+    player = Player(spawn_x, spawn_y)
+
+    # Precompute wall polygons for faster drawing (optional)
+    wall_rects = walls
+
+    running = True
+    while running:
+        # Event handling (per Pygame event docs)
+        # https://www.pygame.org/docs/ref/event.html
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                running = False
+
+        keys = pygame.key.get_pressed()
+        player.update(keys, wall_rects)
+
+        # Draw
+        screen.fill(BG_COLOR)
+        # background
+        screen.blit(bg_img, (0, 0))
+
+        # walls (semi-transparent overlay)
+        for r in wall_rects:
+            pygame.draw.rect(screen, WALL_COLOR, r, width=0)
+
+        # player
+        pygame.draw.rect(screen, PLAYER_COLOR, player.rect, width=0)
+
+        # HUD
+        font = pygame.font.SysFont(None, 20)
+        info = font.render("Arrows/A,D to move • Space/W/Up to jump • ESC to quit", True, (20, 20, 20))
+        screen.blit(info, (12, 10))
+
+        pygame.display.flip()
+        if keys[pygame.K_ESCAPE]:
+            running = False
+        clock.tick(60)
+
+    pygame.quit()
+
+if __name__ == "__main__":
+    main()
